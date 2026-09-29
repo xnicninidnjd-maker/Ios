@@ -1,0 +1,211 @@
+name: Build NEON OS APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract project ZIP
+        shell: bash
+        run: |
+          set -e
+          mkdir -p input_project
+
+          ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+
+          if [ -n "$ZIP" ]; then
+            unzip -o "$ZIP" -d input_project
+          else
+            echo "ZIP not found; searching repository for HTML"
+            mkdir -p input_project
+            find . -maxdepth 1 -type f -iname '*.html' \
+              -exec cp {} input_project/ \;
+          fi
+
+      - name: Prepare Android project
+        shell: bash
+        run: |
+          set -e
+
+          HTML=""
+
+          for NAME in NEON_OS_0.6-2.html NEON_OS_0.6.html index.html; do
+            HTML="$(find input_project -type f -iname "$NAME" | head -n 1)"
+            if [ -n "$HTML" ]; then
+              break
+            fi
+          done
+
+          if [ -z "$HTML" ]; then
+            HTML="$(find input_project -type f -iname '*.html' | head -n 1)"
+          fi
+
+          if [ -z "$HTML" ]; then
+            echo "ERROR: No HTML file found in ZIP"
+            exit 1
+          fi
+
+          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/java/com/neon/os
+
+          cp "$HTML" app/src/main/assets/index.html
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "NeonOS"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.neon.os'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.neon.os'
+                  minSdk 23
+                  targetSdk 28
+                  versionCode 1
+                  versionName '0.6'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:label="NEON OS"
+                  android:usesCleartextTraffic="true"
+                  android:hardwareAccelerated="true"
+                  android:allowBackup="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/neon/os/MainActivity.java <<'EOF'
+          package com.neon.os;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.view.View;
+          import android.graphics.Color;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  getWindow().setStatusBarColor(Color.rgb(8, 10, 18));
+                  getWindow().setNavigationBarColor(Color.rgb(8, 10, 18));
+                  getWindow().getDecorView().setSystemUiVisibility(0);
+
+                  webView = new WebView(this);
+                  webView.setBackgroundColor(Color.rgb(8, 10, 18));
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setMediaPlaybackRequiresUserGesture(false);
+
+                  webView.setWebViewClient(new WebViewClient());
+                  setContentView(webView);
+                  webView.loadUrl("file:///android_asset/index.html");
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload NEON OS APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEON-OS-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
