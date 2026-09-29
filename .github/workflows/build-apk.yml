@@ -1,17 +1,19 @@
 name: Build NEON OS APK
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build Android APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -20,49 +22,38 @@ jobs:
       - name: Find and extract project ZIP
         shell: bash
         run: |
-          set -e
-          mkdir -p input_project
-
-          ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
-
-          if [ -n "$ZIP" ]; then
-            unzip -o "$ZIP" -d input_project
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/neon_input"
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -not -path '*/.git/*' | head -n 1 || true)"
+          if [[ -n "$ZIP_FILE" ]]; then
+            echo "Extracting: $ZIP_FILE"
+            unzip -oq "$ZIP_FILE" -d "$RUNNER_TEMP/neon_input"
           else
-            echo "ZIP not found; searching repository for HTML"
-            mkdir -p input_project
-            find . -maxdepth 1 -type f -iname '*.html' \
-              -exec cp {} input_project/ \;
+            echo "No ZIP found in the repository; will look for an HTML file directly."
           fi
 
       - name: Prepare Android project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          HTML=""
+          HTML_FILE="$(find "$GITHUB_WORKSPACE" "$RUNNER_TEMP/neon_input" \
+            -type f \( -iname 'NEON_OS_0.6-2.html' -o -iname 'NEON_OS_0.6.html' -o -iname 'index.html' \) \
+            -not -path '*/.git/*' \
+            -not -path '*/app/src/main/assets/index.html' \
+            | sort | head -n 1 || true)"
 
-          for NAME in NEON_OS_0.6-2.html NEON_OS_0.6.html index.html; do
-            HTML="$(find input_project -type f -iname "$NAME" | head -n 1)"
-            if [ -n "$HTML" ]; then
-              break
-            fi
-          done
-
-          if [ -z "$HTML" ]; then
-            HTML="$(find input_project -type f -iname '*.html' | head -n 1)"
-          fi
-
-          if [ -z "$HTML" ]; then
-            echo "ERROR: No HTML file found in ZIP"
+          if [[ -z "$HTML_FILE" ]]; then
+            echo "ERROR: Could not find NEON_OS_0.6-2.html, NEON_OS_0.6.html, or index.html."
+            echo "Upload the NEON OS HTML file or NEON_OS_0.6_APK_Project.zip to the repository root."
             exit 1
           fi
 
-          mkdir -p app/src/main/assets
-          mkdir -p app/src/main/java/com/neon/os
+          echo "Using HTML: $HTML_FILE"
+          mkdir -p app/src/main/assets app/src/main/java/com/neon/os
+          cp "$HTML_FILE" app/src/main/assets/index.html
 
-          cp "$HTML" app/src/main/assets/index.html
-
-          cat > settings.gradle <<'EOF'
+          cat > settings.gradle <<'GRADLE'
           pluginManagement {
               repositories {
                   google()
@@ -77,17 +68,17 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "NeonOS"
-          include(":app")
-          EOF
+          rootProject.name = 'NEONOS'
+          include ':app'
+          GRADLE
 
-          cat > build.gradle <<'EOF'
+          cat > build.gradle <<'GRADLE'
           plugins {
               id 'com.android.application' version '8.7.3' apply false
           }
-          EOF
+          GRADLE
 
-          cat > app/build.gradle <<'EOF'
+          cat > app/build.gradle <<'GRADLE'
           plugins {
               id 'com.android.application'
           }
@@ -99,50 +90,55 @@ jobs:
               defaultConfig {
                   applicationId 'com.neon.os'
                   minSdk 23
-                  targetSdk 28
-                  versionCode 1
+                  targetSdk 35
+                  versionCode 6
                   versionName '0.6'
               }
-          }
-          EOF
 
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+                  release {
+                      minifyEnabled false
+                  }
+              }
+          }
+          GRADLE
+
+          cat > app/src/main/AndroidManifest.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
-
               <application
-                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:allowBackup="true"
                   android:label="NEON OS"
                   android:usesCleartextTraffic="true"
-                  android:hardwareAccelerated="true"
-                  android:allowBackup="false">
-
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
                   <activity
                       android:name=".MainActivity"
-                      android:exported="true"
-                      android:screenOrientation="portrait"
-                      android:configChanges="orientation|screenSize|keyboardHidden">
-
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
-
                   </activity>
               </application>
           </manifest>
-          EOF
+          XML
 
-          cat > app/src/main/java/com/neon/os/MainActivity.java <<'EOF'
+          cat > app/src/main/java/com/neon/os/MainActivity.java <<'JAVA'
           package com.neon.os;
 
           import android.app.Activity;
+          import android.graphics.Color;
           import android.os.Bundle;
+          import android.view.View;
+          import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
-          import android.view.View;
-          import android.graphics.Color;
 
           public class MainActivity extends Activity {
               private WebView webView;
@@ -150,10 +146,8 @@ jobs:
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-
                   getWindow().setStatusBarColor(Color.rgb(8, 10, 18));
                   getWindow().setNavigationBarColor(Color.rgb(8, 10, 18));
-                  getWindow().getDecorView().setSystemUiVisibility(0);
 
                   webView = new WebView(this);
                   webView.setBackgroundColor(Color.rgb(8, 10, 18));
@@ -161,10 +155,13 @@ jobs:
                   WebSettings settings = webView.getSettings();
                   settings.setJavaScriptEnabled(true);
                   settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
                   settings.setAllowFileAccess(true);
+                  settings.setAllowContentAccess(true);
                   settings.setMediaPlaybackRequiresUserGesture(false);
 
                   webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient());
                   setContentView(webView);
                   webView.loadUrl("file:///android_asset/index.html");
               }
@@ -178,7 +175,7 @@ jobs:
                   }
               }
           }
-          EOF
+          JAVA
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -187,25 +184,52 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+        shell: bash
         run: |
-          sdkmanager "platform-tools" \
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$SDK_ROOT"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "ERROR: sdkmanager was not found on this GitHub runner."
+            exit 1
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
+            "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+      - name: Install Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_VERSION="8.9"
+          curl --fail --location --retry 3 \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+            -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
 
-      - name: Build APK
-        run: gradle --no-daemon assembleDebug
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace assembleDebug
 
-      - name: Upload NEON OS APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: NEON-OS-APK
+          name: NEON-OS-0.6-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
