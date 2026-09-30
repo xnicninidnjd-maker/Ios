@@ -1,0 +1,113 @@
+name: Build NEON OS APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # GitHub-hosted Ubuntu runners already include Android SDK.
+      # Skip setup-android@v3 because it fails looking for obsolete package "tools".
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "ERROR: sdkmanager not found under $SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Install Gradle 8.9
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          echo "/tmp/gradle-8.9/bin" >> "$GITHUB_PATH"
+          /tmp/gradle-8.9/bin/gradle --version
+
+      - name: Prepare Android project from launcher ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT_DIR="$RUNNER_TEMP/neon_project_input"
+          mkdir -p "$INPUT_DIR"
+
+          # Prefer the full Android project ZIP, not the standalone HTML file.
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*LAUNCHER_PROJECT*.zip' -not -path '*/.git/*' -print -quit)"
+          if [[ -z "$ZIP_FILE" ]]; then
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -not -path '*/.git/*' -print -quit)"
+          fi
+          if [[ -z "$ZIP_FILE" ]]; then
+            echo "ERROR: No Android project ZIP found. Upload NEON_OS_0.6_LAUNCHER_PROJECT.zip to the repository root."
+            exit 1
+          fi
+
+          echo "Using project archive: $(basename "$ZIP_FILE")"
+          unzip -q "$ZIP_FILE" -d "$INPUT_DIR"
+          PROJECT_DIR="$(find "$INPUT_DIR" -type f -name settings.gradle -printf '%h\n' | while read -r d; do if [[ -f "$d/app/build.gradle" && -f "$d/app/src/main/AndroidManifest.xml" ]]; then echo "$d"; break; fi; done)"
+          if [[ -z "$PROJECT_DIR" ]]; then
+            echo "ERROR: ZIP does not contain a complete Android project (settings.gradle and app/build.gradle)."
+            exit 1
+          fi
+
+          # Copy the actual Android project into the workspace, preserving dotfiles.
+          cp -a "$PROJECT_DIR"/. "$GITHUB_WORKSPACE"/
+
+          # Ensure the installed app is registered as both an app and a HOME launcher.
+          MANIFEST="$GITHUB_WORKSPACE/app/src/main/AndroidManifest.xml"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "ERROR: AndroidManifest.xml is missing after extracting the project."
+            exit 1
+          fi
+          if ! grep -q 'android.intent.category.HOME' "$MANIFEST"; then
+            python3 - "$MANIFEST" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          s = p.read_text(encoding='utf-8')
+          marker = '''            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>'''
+          addition = marker + '''\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.HOME" />\n                <category android:name="android.intent.category.DEFAULT" />\n            </intent-filter>'''
+          if marker not in s:
+              raise SystemExit('Could not safely locate the LAUNCHER intent-filter in AndroidManifest.xml')
+          p.write_text(s.replace(marker, addition, 1), encoding='utf-8')
+          PY
+          fi
+
+          echo "Android project prepared. HOME launcher filter:"
+          grep -n -A4 -B1 'android.intent.category.HOME' "$MANIFEST"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEON-OS-HOME-LAUNCHER-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
